@@ -185,8 +185,8 @@ def yt_download_streaming(url: str, output_dir: str = "downloads") -> Generator[
             "yt-dlp",
             "-f", "bestvideo+bestaudio/best",
             "--merge-output-format", "mp4",
-            "--newline",  # Output progress on new lines for easier parsing
-            "--progress",  # Show progress
+            "--newline",
+            "--progress",
             "-o", output_template,
             url
         ]
@@ -201,6 +201,8 @@ def yt_download_streaming(url: str, output_dir: str = "downloads") -> Generator[
             universal_newlines=True
         )
 
+        current_stream_type: Optional[str] = None
+
         # Stream progress updates
         for line in iter(process.stdout.readline, ''):
             if not line:
@@ -208,7 +210,27 @@ def yt_download_streaming(url: str, output_dir: str = "downloads") -> Generator[
             
             line = line.strip()
             
-            # Parse progress lines (format: [download] X.X% of Y.YMiB at Z.ZMiB/s ETA MM:SS)
+            # Detect stream type changes
+            if '[download] Destination:' in line:
+                # Determine stream type from the line
+                new_stream_type = None
+                line_lower = line.lower()
+                
+                if any(ext in line_lower for ext in ['.m4a', '.webm', '.opus', 'audio']):
+                    new_stream_type = 'audio'
+                elif any(ext in line_lower for ext in ['.mp4', '.webm', 'video']):
+                    new_stream_type = 'video'
+                
+                # Send info event when stream type changes
+                if new_stream_type and new_stream_type != current_stream_type:
+                    current_stream_type = new_stream_type
+                    yield send_event("info", {
+                        "status": "downloading",
+                        "stream_type": current_stream_type,
+                        "message": f"Downloading {current_stream_type}..."
+                    })
+            
+            # Parse progress lines
             if '[download]' in line and '%' in line:
                 try:
                     parts = line.split()
@@ -216,7 +238,10 @@ def yt_download_streaming(url: str, output_dir: str = "downloads") -> Generator[
                         percent_str = parts[1].rstrip('%')
                         try:
                             percent = float(percent_str)
-                            progress_data = {"percent": percent}
+                            progress_data = {
+                                "percent": percent,
+                                "stream_type": current_stream_type
+                            }
                             
                             # Extract additional info if available
                             if 'of' in parts:
@@ -240,12 +265,7 @@ def yt_download_streaming(url: str, output_dir: str = "downloads") -> Generator[
                 except Exception:
                     pass
             
-            # Send other notable events
-            elif '[download] Destination:' in line:
-                yield send_event("info", {
-                    "status": "downloading",
-                    "message": line.replace('[download]', '').strip()
-                })
+            # Send merging event
             elif '[Merger]' in line or 'Merging' in line:
                 yield send_event("info", {
                     "status": "merging",
@@ -317,3 +337,4 @@ def yt_download_streaming(url: str, output_dir: str = "downloads") -> Generator[
             "status": "error",
             "message": f"Unexpected error: {str(e)}"
         })
+
