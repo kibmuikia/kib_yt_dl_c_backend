@@ -8,7 +8,7 @@ from app.utils.tool_check import check_tool_exists, get_tool_version
 from app.utils.url_validator import is_valid_youtube_url
 
 
-def yt_download(url: str, output_dir: str = "downloads") -> Dict[str, Any]:
+def yt_download(url: str, output_dir: str = "downloads", return_binary: bool = False) -> Dict[str, Any]:
     """
     Download a YouTube video using yt-dlp (non-streaming version).
     Validates URL, checks dependencies, and executes the download command safely.
@@ -16,9 +16,10 @@ def yt_download(url: str, output_dir: str = "downloads") -> Dict[str, Any]:
     Args:
         url: YouTube video URL.
         output_dir: Directory to save downloaded video.
+        return_binary: If True, include video binary data in response.
 
     Returns:
-        Status, message, and metadata.
+        Status, message, metadata, and optionally binary data.
     """
     try:
         # Validate URL
@@ -94,7 +95,7 @@ def yt_download(url: str, output_dir: str = "downloads") -> Dict[str, Any]:
         filename = f"{data.get('title')}.mp4"
         filepath = os.path.join(output_dir, filename)
 
-        return {
+        response = {
             "status": "success",
             "message": "Video downloaded successfully.",
             "file": {
@@ -116,6 +117,14 @@ def yt_download(url: str, output_dir: str = "downloads") -> Dict[str, Any]:
             },
         }
 
+        # Add binary data if requested
+        if return_binary and os.path.exists(filepath):
+            with open(filepath, 'rb') as f:
+                response["video_bytes"] = f.read()
+            response["content_type"] = "video/mp4"
+
+        return response
+
     except json.JSONDecodeError:
         return {
             "status": "error",
@@ -131,13 +140,14 @@ def yt_download(url: str, output_dir: str = "downloads") -> Dict[str, Any]:
         }
 
 
-def yt_download_streaming(url: str, output_dir: str = "downloads") -> Generator[str, None, None]:
+def yt_download_streaming(url: str, output_dir: str = "downloads", return_binary: bool = False) -> Generator[str, None, None]:
     """
     Download a YouTube video with streaming progress updates via Server-Sent Events.
 
     Args:
         url: YouTube video URL.
         output_dir: Directory to save downloaded video.
+        return_binary: If True, send binary data in final complete event.
 
     Yields:
         SSE-formatted progress updates.
@@ -302,7 +312,7 @@ def yt_download_streaming(url: str, output_dir: str = "downloads") -> Generator[
                 if os.path.exists(filepath):
                     file_size = round(os.path.getsize(filepath) / (1024 * 1024), 2)
 
-                yield send_event("complete", {
+                complete_data = {
                     "status": "success",
                     "message": "Video downloaded successfully.",
                     "file": {
@@ -319,7 +329,16 @@ def yt_download_streaming(url: str, output_dir: str = "downloads") -> Generator[
                         "view_count": data.get("view_count"),
                         "thumbnail": data.get("thumbnail"),
                     },
-                })
+                }
+
+                # Add binary data if requested
+                if return_binary and os.path.exists(filepath):
+                    with open(filepath, 'rb') as f:
+                        import base64
+                        complete_data["video_base64"] = base64.b64encode(f.read()).decode('utf-8')
+                    complete_data["content_type"] = "video/mp4"
+
+                yield send_event("complete", complete_data)
             else:
                 yield send_event("complete", {
                     "status": "success",

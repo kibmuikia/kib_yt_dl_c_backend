@@ -59,6 +59,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             query = parse_qs(urlparse(self.path).query)
             url = query.get('url', [None])[0]
             stream = query.get('stream', ['false'])[0].lower() == 'true'
+            binary = query.get('binary', ['false'])[0].lower() == 'true'
 
             if not url:
                 self._set_headers(400)
@@ -77,7 +78,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     self.end_headers()
 
                     try:
-                        for event in yt_download_streaming(url):
+                        for event in yt_download_streaming(url, return_binary=binary):
                             self.wfile.write(event.encode('utf-8'))
                             self.wfile.flush()
                     except Exception as e:
@@ -86,10 +87,25 @@ class RequestHandler(BaseHTTPRequestHandler):
                         self.wfile.flush()
                 else:
                     # Regular non-streaming download
-                    result = yt_download(url)
-                    code = 200 if result.get("status") == "success" else 400
-                    self._set_headers(code)
-                    self.wfile.write(json.dumps(result).encode())
+                    result = yt_download(url, return_binary=binary)
+                    
+                    # If binary is requested and available, return video file directly
+                    if binary and result.get("status") == "success" and "video_bytes" in result:
+                        from urllib.parse import quote
+                        filename = result["file"]["name"]
+                        # Encode filename for Content-Disposition header (RFC 5987)
+                        encoded_filename = quote(filename)
+                        
+                        self.send_response(200)
+                        self.send_header('Content-Type', result.get("content_type", "video/mp4"))
+                        self.send_header('Content-Disposition', f'attachment; filename*=UTF-8\'\'{encoded_filename}')
+                        self.end_headers()
+                        self.wfile.write(result["video_bytes"])
+                    else:
+                        # Return JSON response
+                        code = 200 if result.get("status") == "success" else 400
+                        self._set_headers(code)
+                        self.wfile.write(json.dumps(result).encode())
         else:
             self._set_headers(404)
             self.wfile.write(json.dumps({"error": "Not found"}).encode())
@@ -114,3 +130,4 @@ def run_server():
 if __name__ == '__main__':
     perform_boot_check()
     run_server()
+
