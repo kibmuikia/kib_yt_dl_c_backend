@@ -1,25 +1,27 @@
 import os
 import json
+import subprocess
+import threading
+import queue
+from typing import Dict, Any, Generator, Optional
 from app.utils.tool_check import check_tool_exists, get_tool_version
 from app.utils.url_validator import is_valid_youtube_url
-from app.utils.shell_tools import run_shell_command
 
 
-def yt_download(url: str, output_dir: str = "downloads"):
+def yt_download(url: str, output_dir: str = "downloads") -> Dict[str, Any]:
     """
-    Download a YouTube video using yt-dlp.
+    Download a YouTube video using yt-dlp (non-streaming version).
     Validates URL, checks dependencies, and executes the download command safely.
 
     Args:
-        url (str): YouTube video URL.
-        output_dir (str): Directory to save downloaded video.
+        url: YouTube video URL.
+        output_dir: Directory to save downloaded video.
 
     Returns:
-        dict: Status, message, and metadata.
+        Status, message, and metadata.
     """
-    
     try:
-        # 1️⃣ Validate URL
+        # Validate URL
         if not is_valid_youtube_url(url):
             return {
                 "status": "error",
@@ -27,7 +29,7 @@ def yt_download(url: str, output_dir: str = "downloads"):
                 "file": None,
             }
 
-        # 2️⃣ Check for required tools
+        # Check for required tools
         required_tools = ["yt-dlp", "ffmpeg"]
         missing = [tool for tool in required_tools if not check_tool_exists(tool)]
 
@@ -39,35 +41,48 @@ def yt_download(url: str, output_dir: str = "downloads"):
                 "file": None,
             }
 
-        # 3️⃣ Get tool versions
+        # Get tool versions
         tool_versions = {tool: get_tool_version(tool) for tool in required_tools}
 
-        # 4️⃣ Ensure output directory exists
+        # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
 
-        # 5️⃣ Build yt-dlp download command
-        # We’ll download the best available quality, save as mp4
-        # and use a clean naming template.
+        # Build yt-dlp download command
         output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
-        cmd = f'yt-dlp -f "bestvideo+bestaudio/best" --merge-output-format mp4 -o "{output_template}" "{url}"'
+        cmd = [
+            "yt-dlp",
+            "-f", "bestvideo+bestaudio/best",
+            "--merge-output-format", "mp4",
+            "-o", output_template,
+            url
+        ]
 
-        # 6️⃣ Run the command
-        output = run_shell_command(cmd)
+        # Run the command
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False
+        )
 
-        # 7️⃣ Handle errors
-        if output.startswith("Error:"):
+        if result.returncode != 0:
             return {
                 "status": "error",
-                "message": output,
+                "message": f"Download failed: {result.stderr}",
                 "tool_versions": tool_versions,
                 "file": None,
             }
 
-        # 8️⃣ Use yt-dlp to fetch metadata about the downloaded file
-        meta_cmd = f'yt-dlp -j --no-warnings "{url}"'
-        meta_output = run_shell_command(meta_cmd)
+        # Fetch metadata about the downloaded file
+        meta_cmd = ["yt-dlp", "-j", "--no-warnings", url]
+        meta_result = subprocess.run(
+            meta_cmd,
+            capture_output=True,
+            text=True,
+            check=False
+        )
 
-        if meta_output.startswith("Error:"):
+        if meta_result.returncode != 0:
             return {
                 "status": "error",
                 "message": "Video downloaded, but failed to retrieve metadata.",
@@ -75,7 +90,7 @@ def yt_download(url: str, output_dir: str = "downloads"):
                 "file": None,
             }
 
-        data = json.loads(meta_output)
+        data = json.loads(meta_result.stdout)
         filename = f"{data.get('title')}.mp4"
         filepath = os.path.join(output_dir, filename)
 
@@ -91,6 +106,7 @@ def yt_download(url: str, output_dir: str = "downloads"):
             },
             "tool_versions": tool_versions,
             "yt_data": {
+                "id": data.get("id"),
                 "title": data.get("title"),
                 "duration": data.get("duration"),
                 "uploader": data.get("uploader"),
@@ -104,7 +120,6 @@ def yt_download(url: str, output_dir: str = "downloads"):
         return {
             "status": "error",
             "message": "Failed to parse metadata from yt-dlp output.",
-            "tool_versions": tool_versions,
             "file": None,
         }
 
@@ -112,6 +127,193 @@ def yt_download(url: str, output_dir: str = "downloads"):
         return {
             "status": "error",
             "message": f"Unexpected error: {str(e)}",
-            "tool_versions": tool_versions,
             "file": None,
         }
+
+
+def yt_download_streaming(url: str, output_dir: str = "downloads") -> Generator[str, None, None]:
+    """
+    Download a YouTube video with streaming progress updates via Server-Sent Events.
+
+    Args:
+        url: YouTube video URL.
+        output_dir: Directory to save downloaded video.
+
+    Yields:
+        SSE-formatted progress updates.
+    """
+    def send_event(event_type: str, data: Dict[str, Any]) -> str:
+        """Format data as Server-Sent Event."""
+        return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+    try:
+        # Validate URL
+        if not is_valid_youtube_url(url):
+            yield send_event("error", {
+                "status": "error",
+                "message": "Invalid YouTube URL provided."
+            })
+            return
+
+        # Check for required tools
+        required_tools = ["yt-dlp", "ffmpeg"]
+        missing = [tool for tool in required_tools if not check_tool_exists(tool)]
+
+        if missing:
+            yield send_event("error", {
+                "status": "error",
+                "message": f"Missing required tool(s): {', '.join(missing)}",
+                "tools": {tool: False for tool in missing}
+            })
+            return
+
+        # Get tool versions
+        tool_versions = {tool: get_tool_version(tool) for tool in required_tools}
+        
+        yield send_event("info", {
+            "status": "starting",
+            "message": "Initializing download...",
+            "tool_versions": tool_versions
+        })
+
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Build yt-dlp download command with progress output
+        output_template = os.path.join(output_dir, "%(title)s.%(ext)s")
+        cmd = [
+            "yt-dlp",
+            "-f", "bestvideo+bestaudio/best",
+            "--merge-output-format", "mp4",
+            "--newline",  # Output progress on new lines for easier parsing
+            "--progress",  # Show progress
+            "-o", output_template,
+            url
+        ]
+
+        # Start the download process
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+
+        # Stream progress updates
+        for line in iter(process.stdout.readline, ''):
+            if not line:
+                break
+            
+            line = line.strip()
+            
+            # Parse progress lines (format: [download] X.X% of Y.YMiB at Z.ZMiB/s ETA MM:SS)
+            if '[download]' in line and '%' in line:
+                try:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        percent_str = parts[1].rstrip('%')
+                        try:
+                            percent = float(percent_str)
+                            progress_data = {"percent": percent}
+                            
+                            # Extract additional info if available
+                            if 'of' in parts:
+                                of_idx = parts.index('of')
+                                if of_idx + 1 < len(parts):
+                                    progress_data["total_size"] = parts[of_idx + 1]
+                            
+                            if 'at' in parts:
+                                at_idx = parts.index('at')
+                                if at_idx + 1 < len(parts):
+                                    progress_data["speed"] = parts[at_idx + 1]
+                            
+                            if 'ETA' in parts:
+                                eta_idx = parts.index('ETA')
+                                if eta_idx + 1 < len(parts):
+                                    progress_data["eta"] = parts[eta_idx + 1]
+                            
+                            yield send_event("progress", progress_data)
+                        except (ValueError, IndexError):
+                            pass
+                except Exception:
+                    pass
+            
+            # Send other notable events
+            elif '[download] Destination:' in line:
+                yield send_event("info", {
+                    "status": "downloading",
+                    "message": line.replace('[download]', '').strip()
+                })
+            elif '[Merger]' in line or 'Merging' in line:
+                yield send_event("info", {
+                    "status": "merging",
+                    "message": "Merging video and audio..."
+                })
+
+        # Wait for process to complete
+        return_code = process.wait()
+
+        if return_code != 0:
+            yield send_event("error", {
+                "status": "error",
+                "message": "Download failed. Check if the URL is valid and accessible."
+            })
+            return
+
+        # Fetch metadata about the downloaded file
+        try:
+            meta_cmd = ["yt-dlp", "-j", "--no-warnings", url]
+            meta_result = subprocess.run(
+                meta_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30
+            )
+
+            if meta_result.returncode == 0:
+                data = json.loads(meta_result.stdout)
+                filename = f"{data.get('title')}.mp4"
+                filepath = os.path.join(output_dir, filename)
+
+                file_size = None
+                if os.path.exists(filepath):
+                    file_size = round(os.path.getsize(filepath) / (1024 * 1024), 2)
+
+                yield send_event("complete", {
+                    "status": "success",
+                    "message": "Video downloaded successfully.",
+                    "file": {
+                        "name": filename,
+                        "path": filepath,
+                        "size_mb": file_size,
+                    },
+                    "yt_data": {
+                        "id": data.get("id"),
+                        "title": data.get("title"),
+                        "duration": data.get("duration"),
+                        "uploader": data.get("uploader"),
+                        "upload_date": data.get("upload_date"),
+                        "view_count": data.get("view_count"),
+                        "thumbnail": data.get("thumbnail"),
+                    },
+                })
+            else:
+                yield send_event("complete", {
+                    "status": "success",
+                    "message": "Video downloaded successfully (metadata unavailable)."
+                })
+
+        except Exception as e:
+            yield send_event("complete", {
+                "status": "success",
+                "message": f"Video downloaded successfully (metadata error: {str(e)})."
+            })
+
+    except Exception as e:
+        yield send_event("error", {
+            "status": "error",
+            "message": f"Unexpected error: {str(e)}"
+        })
