@@ -1,8 +1,7 @@
 # app/routes/route_handlers.py
 
 import json
-from typing import Dict, Any, Optional
-from http.server import BaseHTTPRequestHandler
+from typing import Dict, Any
 
 from app.routes.basic_routes import home, health
 from app.routes.yt_details import yt_details
@@ -25,7 +24,7 @@ class HandlerMixin:
         self.write_json(health())
 
     def handle_yt_details(self, query: QueryDict) -> None:
-        url: Optional[str] = query.get("url", [None])[0]
+        url: str | None = query.get("url", [None])[0]
         if not url:
             self.write_json({
                 "status": "error",
@@ -65,9 +64,9 @@ class HandlerMixin:
             if stream:
                 self.send_response(200)
                 self.send_header("Content-type", "text/event-stream")
-                self.set_header("Cache-Control", "no-cache")
-                self.set_header("Connection", "keep-alive")
-                self.set_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 try:
                     for event in yt_download_streaming(url):
@@ -78,6 +77,7 @@ class HandlerMixin:
                     self.wfile.write(error_event.encode('utf-8'))
                     self.wfile.flush()
             else:
-                result: Dict[str, Any] = yt_download(url)
+                result: dict[str, Any] = yt_download(url)
                 code = 200 if result.get("status") == "success" else 400
                 self.write_json(result, code)
+
