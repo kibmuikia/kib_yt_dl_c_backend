@@ -1,3 +1,5 @@
+# app/utils/boot_check.py
+
 import sys
 from app.utils.tool_check import check_tool_exists, get_tool_version
 

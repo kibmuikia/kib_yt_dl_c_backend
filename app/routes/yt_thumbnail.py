@@ -1,3 +1,5 @@
+# app/routes/yt_thumbnail.py
+
 import json
 import subprocess
 import requests  # for fetching thumbnail image
